@@ -2395,26 +2395,13 @@ static int nsh_parse_cmdparm(FAR struct nsh_vtbl_s *vtbl, FAR char *cmdline,
    */
 
   argv[0] = cmd;
-  argc = 1;
-  while (argc < MAX_ARGV_ENTRIES - 1)
+  for (argc = 1; argc < MAX_ARGV_ENTRIES - 1; argc++)
     {
-      FAR char *arg = nsh_argument(vtbl, &saveptr, &memlist, NULL, NULL);
-      if (!arg)
+      argv[argc] = nsh_argument(vtbl, &saveptr, &memlist, NULL, NULL);
+      if (!argv[argc])
         {
           break;
         }
-
-      /* Skip empty arguments resulting from empty variable expansions.
-       * These should be removed from argv, but should not prevent processing
-       * of subsequent arguments.
-       */
-
-      if (*arg == '\0')
-        {
-          continue;
-        }
-
-      argv[argc++] = arg;
     }
 
   argv[argc] = NULL;
@@ -2582,13 +2569,6 @@ static int nsh_parse_command(FAR struct nsh_vtbl_s *vtbl, FAR char *cmdline)
       if (!argv[argc])
         {
           break;
-        }
-
-      /* Skip empty arguments resulting from empty variable expansions */
-
-      if (*argv[argc] == '\0')
-        {
-          continue;
         }
 
       if (isenvvar != 0)
