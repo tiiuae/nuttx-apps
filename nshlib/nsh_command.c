@@ -32,6 +32,9 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <stddef.h>
+#ifndef CONFIG_DISABLE_PTHREAD
+#  include <pthread.h>
+#endif
 
 #ifdef CONFIG_NSH_BUILTIN_APPS
 #  include <nuttx/lib/builtin.h>
@@ -710,6 +713,18 @@ static const struct cmdmap_s g_cmdmap[] =
 #endif
   CMD_MAP(NULL,       NULL,         1, 1, NULL)
 };
+
+/* Static cache for file app completion */
+
+#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+    defined(CONFIG_READLINE_HAVE_EXTMATCH) && defined(CONFIG_NSH_FILE_APPS)
+static struct file_app_info_s g_completion_cache;
+#ifndef CONFIG_DISABLE_PTHREAD
+static pthread_once_t g_completion_cache_once = PTHREAD_ONCE_INIT;
+#else
+static bool g_completion_cache_initialized = false;
+#endif
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -1599,10 +1614,28 @@ int nsh_command(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char *argv[])
 
 #if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
     defined(CONFIG_READLINE_HAVE_EXTMATCH)
+#ifdef CONFIG_NSH_FILE_APPS
+static void nsh_extmatch_init_file_apps(void)
+{
+  if (collect_path_file_apps(&g_completion_cache) == OK)
+    {
+#ifdef CONFIG_DISABLE_PTHREAD
+      g_completion_cache_initialized = true;
+#endif
+    }
+  else
+    {
+      g_completion_cache.count = 0;
+    }
+}
+#endif
+
 int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
 {
   int nr_matches = 0;
   int i;
+
+  /* Search built-in commands */
 
   for (i = 0; i < (int)NUM_CMDS; i++)
     {
@@ -1613,10 +1646,39 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
 
           if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
             {
-              break;
+              return nr_matches;
             }
         }
     }
+
+  /* Initialize file app cache on first call */
+
+#ifdef CONFIG_NSH_FILE_APPS
+#ifndef CONFIG_DISABLE_PTHREAD
+  pthread_once(&g_completion_cache_once, nsh_extmatch_init_file_apps);
+#else
+  if (!g_completion_cache_initialized)
+    {
+      nsh_extmatch_init_file_apps();
+    }
+#endif
+
+  /* Search cached file apps */
+
+  for (i = 0; i < (int)g_completion_cache.count; i++)
+    {
+      if (strncmp(name, g_completion_cache.names[i], namelen) == 0)
+        {
+          matches[nr_matches] = NUM_CMDS + i;
+          nr_matches++;
+
+          if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
+            {
+              return nr_matches;
+            }
+        }
+    }
+#endif
 
   return nr_matches;
 }
@@ -1642,7 +1704,30 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
     defined(CONFIG_READLINE_HAVE_EXTMATCH)
 FAR const char *nsh_extmatch_getname(int index)
 {
-  DEBUGASSERT(index > 0 && index <= (int)NUM_CMDS);
-  return  g_cmdmap[index].cmd;
+  if (index < (int)NUM_CMDS)
+    {
+      DEBUGASSERT(index >= 0 && index < (int)NUM_CMDS);
+      return g_cmdmap[index].cmd;
+    }
+
+#ifdef CONFIG_NSH_FILE_APPS
+#ifndef CONFIG_DISABLE_PTHREAD
+  pthread_once(&g_completion_cache_once, nsh_extmatch_init_file_apps);
+  if (index >= (int)NUM_CMDS)
+#else
+  else if (index >= (int)NUM_CMDS
+           && g_completion_cache_initialized
+          )
+#endif
+    {
+      int file_index = index - NUM_CMDS;
+      if (file_index < (int)g_completion_cache.count)
+        {
+          return g_completion_cache.names[file_index];
+        }
+    }
+#endif
+
+  return NULL;
 }
 #endif
