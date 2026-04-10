@@ -859,8 +859,25 @@ int nsh_builtin(FAR struct nsh_vtbl_s *vtbl, FAR const char *cmd,
 #endif
 
 #ifdef CONFIG_NSH_FILE_APPS
+/* NOTE: Initialize before first use with NSH_FILE_APP_INFO_INITIALIZER
+ * (or an equivalent helper that zeroes all fields).
+ */
+
+struct file_app_info_s
+{
+  FAR char **names;
+  unsigned int count;
+  unsigned int alloc;
+};
+
+#define NSH_FILE_APP_INFO_INITIALIZER { NULL, 0, 0 }
+
 int nsh_fileapp(FAR struct nsh_vtbl_s *vtbl, FAR const char *cmd,
                 FAR char **argv, FAR const struct nsh_param_s *param);
+int nsh_collect_path_file_apps(FAR struct file_app_info_s *info,
+                               FAR const char *prefix,
+                               int prefix_len);
+void nsh_free_file_apps(FAR struct file_app_info_s *info);
 #endif
 
 /* Working directory support */

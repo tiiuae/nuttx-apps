@@ -40,7 +40,7 @@ CSRCS += nsh_builtin.c
 endif
 
 ifeq ($(CONFIG_NSH_FILE_APPS),y)
-CSRCS += nsh_fileapps.c
+CSRCS += nsh_fileapps.c nsh_fileapps_helper.c
 endif
 
 ifeq ($(CONFIG_NSH_VARS),y)
