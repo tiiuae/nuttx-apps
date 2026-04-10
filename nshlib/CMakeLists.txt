@@ -55,7 +55,7 @@ if(CONFIG_NSH_LIBRARY)
   endif()
 
   if(CONFIG_NSH_FILE_APPS)
-    list(APPEND CSRCS nsh_fileapps.c)
+    list(APPEND CSRCS nsh_fileapps.c nsh_fileapps_helper.c)
   endif()
 
   if(CONFIG_NSH_VARS)

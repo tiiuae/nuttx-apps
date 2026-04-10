@@ -680,6 +680,12 @@ static const struct cmdmap_s g_cmdmap[] =
   CMD_MAP(NULL,       NULL,         1, 1, NULL)
 };
 
+#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+    defined(CONFIG_READLINE_HAVE_EXTMATCH) && defined(CONFIG_NSH_FILE_APPS)
+static struct file_app_info_s g_file_app_matches =
+  NSH_FILE_APP_INFO_INITIALIZER;
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -1276,7 +1282,7 @@ int nsh_command(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char *argv[])
  * Description:
  *   This support function is used to provide support for realine tab-
  *   completion logic  nsh_extmatch_count() counts the number of matching
- *   nsh command names
+ *   nsh command and file application names
  *
  * Input Parameters:
  *   name    - A point to the name containing the name to be matched.
@@ -1310,6 +1316,28 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
         }
     }
 
+#ifdef CONFIG_NSH_FILE_APPS
+  if (nr_matches < CONFIG_READLINE_MAX_EXTCMDS)
+    {
+      int ret;
+      ret = nsh_collect_path_file_apps(&g_file_app_matches, name, namelen);
+
+      if (ret >= 0)
+        {
+          for (i = 0; i < (int)g_file_app_matches.count; i++)
+            {
+              matches[nr_matches] = (int)NUM_CMDS + i;
+              nr_matches++;
+
+              if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
+                {
+                  break;
+                }
+            }
+        }
+    }
+#endif
+
   return nr_matches;
 }
 #endif
@@ -1334,7 +1362,19 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
     defined(CONFIG_READLINE_HAVE_EXTMATCH)
 FAR const char *nsh_extmatch_getname(int index)
 {
-  DEBUGASSERT(index > 0 && index <= (int)NUM_CMDS);
-  return  g_cmdmap[index].cmd;
+  DEBUGASSERT(index >= 0);
+
+  if (index < (int)NUM_CMDS)
+    {
+      return g_cmdmap[index].cmd;
+    }
+
+#ifdef CONFIG_NSH_FILE_APPS
+  index -= (int)NUM_CMDS;
+  DEBUGASSERT(index >= 0 && index < (int)g_file_app_matches.count);
+  return g_file_app_matches.names[index];
+#else
+  return NULL;
+#endif
 }
 #endif
