@@ -26,9 +26,15 @@
 
 #include <nuttx/config.h>
 
+#include <dirent.h>
+#include <errno.h>
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <stddef.h>
+#ifndef CONFIG_DISABLE_PTHREAD
+#  include <pthread.h>
+#endif
 
 #ifdef CONFIG_NSH_BUILTIN_APPS
 #  include <nuttx/lib/builtin.h>
@@ -76,12 +82,25 @@ struct cmdmap_s
 #endif
 };
 
+#ifdef CONFIG_NSH_FILE_APPS
+struct file_app_info_s
+{
+  FAR char **names;
+  unsigned int count;
+  unsigned int alloc;
+};
+#endif
+
 /****************************************************************************
  * Private Function Prototypes
  ****************************************************************************/
 
 #ifndef CONFIG_NSH_DISABLE_HELP
 static int  cmd_help(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv);
+#endif
+
+#if defined(CONFIG_NSH_FILE_APPS) && !defined(CONFIG_NSH_DISABLE_HELP)
+static void help_file_apps(FAR struct nsh_vtbl_s *vtbl);
 #endif
 
 #ifndef CONFIG_NSH_DISABLESCRIPT
@@ -101,9 +120,24 @@ static int cmd_expr(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv);
 static int  cmd_unrecognized(FAR struct nsh_vtbl_s *vtbl, int argc,
                              FAR char **argv);
 
+#if !defined(CONFIG_NSH_DISABLE_HELP) && \
+  (defined(CONFIG_NSH_BUILTIN_APPS) || defined(CONFIG_NSH_FILE_APPS))
+static void help_namelist(FAR struct nsh_vtbl_s *vtbl,
+                          FAR const char *prompt,
+                          unsigned int count,
+                          FAR const char * const *names);
+#endif
+
+#if defined(CONFIG_NSH_FILE_APPS) && !defined(CONFIG_NSH_DISABLE_HELP)
+static void free_file_apps(FAR struct file_app_info_s *info);
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
+#ifdef CONFIG_BUILTIN
+extern const int g_builtin_count;
+#endif
 
 static const struct cmdmap_s g_cmdmap[] =
 {
@@ -680,6 +714,18 @@ static const struct cmdmap_s g_cmdmap[] =
   CMD_MAP(NULL,       NULL,         1, 1, NULL)
 };
 
+/* Static cache for file app completion */
+
+#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+    defined(CONFIG_READLINE_HAVE_EXTMATCH) && defined(CONFIG_NSH_FILE_APPS)
+static struct file_app_info_s g_completion_cache;
+#ifndef CONFIG_DISABLE_PTHREAD
+static pthread_once_t g_completion_cache_once = PTHREAD_ONCE_INIT;
+#else
+static bool g_completion_cache_initialized = false;
+#endif
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -876,102 +922,92 @@ static inline void help_allcmds(FAR struct nsh_vtbl_s *vtbl)
 #endif
 
 /****************************************************************************
- * Name: help_builtins
+ * Name: help_namelist
  ****************************************************************************/
 
-#ifndef CONFIG_NSH_DISABLE_HELP
-static inline void help_builtins(FAR struct nsh_vtbl_s *vtbl)
+#if !defined(CONFIG_NSH_DISABLE_HELP) && \
+  (defined(CONFIG_NSH_BUILTIN_APPS) || defined(CONFIG_NSH_FILE_APPS))
+static void help_namelist(FAR struct nsh_vtbl_s *vtbl,
+                          FAR const char *prompt,
+                          unsigned int count,
+                          FAR const char * const *names)
 {
-  UNUSED(vtbl);
-
-#ifdef CONFIG_NSH_BUILTIN_APPS
-  FAR const struct builtin_s *builtin;
-  unsigned int builtins_per_line;
-  unsigned int num_builtin_rows;
-  unsigned int builtin_width;
-  unsigned int num_builtins;
+  unsigned int names_per_line;
+  unsigned int num_rows;
   unsigned int column_width;
   unsigned int i;
   unsigned int j;
   unsigned int k;
   unsigned int offset;
-
-  /* Extra 5 bytes for tab before newline and '\0' */
-
   char line[HELP_LINELEN + HELP_TABSIZE + 1];
 
-  static FAR const char *const g_builtin_prompt = "\nBuiltin Apps:\n";
-
-  /* Count the number of built-in commands and get the optimal column width */
-
-  num_builtins = 0;
   column_width = 0;
-
-  for (i = 0; (builtin = builtin_for_index(i)) != NULL; i++)
+  for (i = 0; i < count; i++)
     {
-      if (builtin->main == NULL)
+      FAR const char *name = names[i];
+      unsigned int width;
+
+      if (name == NULL)
         {
           continue;
         }
 
-      num_builtins++;
-
-      builtin_width = strlen(builtin->name);
-      if (builtin_width > column_width)
+      width = strlen(name);
+      if (width > column_width)
         {
-          column_width = builtin_width;
+          column_width = width;
         }
     }
 
-  /* Skip the printing if no available built-in commands */
-
-  if (num_builtins == 0)
+  if (column_width == 0)
     {
       return;
     }
 
   column_width += HELP_TABSIZE;
 
-  /* Determine the number of commands to put on one line */
-
   if (column_width > HELP_LINELEN)
     {
-      builtins_per_line = 1;
+      names_per_line = 1;
     }
   else
     {
-      builtins_per_line = HELP_LINELEN / column_width;
+      names_per_line = HELP_LINELEN / column_width;
     }
 
-  /* Determine the total number of lines to output */
+  num_rows = (count + (names_per_line - 1)) / names_per_line;
 
-  num_builtin_rows = ((num_builtins + (builtins_per_line - 1)) /
-                      builtins_per_line);
-
-  /* List the set of available built-in commands */
-
-  nsh_write(vtbl, g_builtin_prompt, strlen(g_builtin_prompt));
-  for (i = 0; i < num_builtin_rows; i++)
+  nsh_write(vtbl, prompt, strlen(prompt));
+  for (i = 0; i < num_rows; i++)
     {
       offset = HELP_TABSIZE;
       memset(line, ' ', offset);
 
-      for (j = 0, k = i;
-           j < builtins_per_line &&
-           (builtin = builtin_for_index(k));
-           j++, k += num_builtin_rows)
+      for (j = 0, k = i; j < names_per_line && k < count;
+           j++, k += num_rows)
         {
-          if (builtin->main == NULL)
+          FAR const char *name = names[k];
+          unsigned int name_width;
+          size_t copied;
+
+          if (name == NULL)
             {
               continue;
             }
 
-          offset += strlcpy(line + offset, builtin->name,
-                            sizeof(line) - offset);
+          copied = strlcpy(line + offset, name, sizeof(line) - offset);
+          if (copied >= sizeof(line) - offset)
+            {
+              offset = sizeof(line) - 1;
+            }
+          else
+            {
+              offset += copied;
+            }
 
-          for (builtin_width = strlen(builtin->name);
-               builtin_width < column_width;
-               builtin_width++)
+          for (name_width = strlen(name);
+               name_width < column_width && offset < sizeof(line) - 1;
+               name_width++)
             {
               line[offset++] = ' ';
             }
@@ -980,7 +1016,288 @@ static inline void help_builtins(FAR struct nsh_vtbl_s *vtbl)
       line[offset++] = '\n';
       nsh_write(vtbl, line, offset);
     }
+}
 #endif
+
+/****************************************************************************
+ * Name: help_builtins
+ ****************************************************************************/
+
+#ifndef CONFIG_NSH_DISABLE_HELP
+static inline void help_builtins(FAR struct nsh_vtbl_s *vtbl)
+{
+#ifdef CONFIG_NSH_BUILTIN_APPS
+  FAR const struct builtin_s *builtin;
+  FAR const char **names;
+  unsigned int num_builtins;
+  unsigned int i;
+  static FAR const char *const g_builtin_prompt = "\nBuiltin Apps:\n";
+
+  num_builtins = g_builtin_count;
+
+  if (num_builtins == 0)
+    {
+      return;
+    }
+
+  names = malloc(num_builtins * sizeof(FAR const char *));
+  if (names == NULL)
+    {
+      return;
+    }
+
+  num_builtins = 0;
+  for (i = 0; (builtin = builtin_for_index(i)) != NULL; i++)
+    {
+      if (builtin->main == NULL)
+        {
+          continue;
+        }
+
+      names[num_builtins++] = builtin->name;
+    }
+
+  help_namelist(vtbl, g_builtin_prompt, num_builtins, names);
+  free(names);
+#endif
+}
+#endif
+
+/****************************************************************************
+ * Name: free_file_apps
+ ****************************************************************************/
+
+#if defined(CONFIG_NSH_FILE_APPS) && !defined(CONFIG_NSH_DISABLE_HELP)
+static void free_file_apps(FAR struct file_app_info_s *info)
+{
+  unsigned int i;
+
+  for (i = 0; i < info->count; i++)
+    {
+      free(info->names[i]);
+    }
+
+  free(info->names);
+}
+#endif
+
+/****************************************************************************
+ * Name: app_name_compare
+ *
+ * Description:
+ *   Comparison function for qsort to sort file app names
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_NSH_FILE_APPS
+static int app_name_compare(const void *a, const void *b)
+{
+  return strcmp(*(const char **)a, *(const char **)b);
+}
+#endif
+
+/****************************************************************************
+ * Name: deduplicate_file_apps
+ *
+ * Description:
+ *   Sort and remove duplicate file app names
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_NSH_FILE_APPS
+static int deduplicate_file_apps(FAR struct file_app_info_s *info)
+{
+  unsigned int i;
+  unsigned int j;
+
+  if (info->count <= 1)
+    {
+      return OK;
+    }
+
+  /* Sort names */
+
+  qsort(info->names, info->count, sizeof(FAR char *), app_name_compare);
+
+  /* Remove duplicates in single pass */
+
+  for (i = 0, j = 1; j < info->count; j++)
+    {
+      if (strcmp(info->names[i], info->names[j]) != 0)
+        {
+          /* Different name, keep it */
+
+          i++;
+          if (i != j)
+            {
+              info->names[i] = info->names[j];
+            }
+        }
+      else
+        {
+          /* Duplicate, free it */
+
+          free(info->names[j]);
+        }
+    }
+
+  /* Update count after deduplication */
+
+  info->count = i + 1;
+
+  return OK;
+}
+#endif
+
+/****************************************************************************
+ * Name: add_file_app
+ *
+ * Description:
+ *   Add a file app name to the collection (duplicates handled later)
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_NSH_FILE_APPS
+static int add_file_app(FAR struct file_app_info_s *info,
+                        FAR const char *name)
+{
+  FAR char **tmp;
+  FAR char *copy;
+
+  if (info->count >= info->alloc)
+    {
+      unsigned int alloc = info->alloc == 0 ? 16 : info->alloc * 2;
+
+      tmp = (FAR char **)realloc(info->names, alloc * sizeof(FAR char *));
+      if (tmp == NULL)
+        {
+          return -ENOMEM;
+        }
+
+      info->names = tmp;
+      info->alloc = alloc;
+    }
+
+  copy = strdup(name);
+  if (copy == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  info->names[info->count++] = copy;
+  return OK;
+}
+#endif
+
+/****************************************************************************
+ * Name: collect_path_file_apps
+ *
+ * Description:
+ *   Shared by help listing and tab-completion cache population.
+ *   Keep this available whenever CONFIG_NSH_FILE_APPS is enabled.
+ ****************************************************************************/
+
+#ifdef CONFIG_NSH_FILE_APPS
+static int collect_path_file_apps(FAR struct file_app_info_s *info)
+{
+  FAR char *pathenv;
+  FAR char *pathlist;
+  FAR char *saveptr = NULL;
+  FAR char *dirpath;
+
+#ifndef CONFIG_DISABLE_ENVIRON
+  pathenv = getenv("PATH");
+#else
+  pathenv = NULL;
+#endif
+
+  if (pathenv == NULL || pathenv[0] == '\0')
+    {
+      return OK;
+    }
+
+  pathlist = strdup(pathenv);
+  if (pathlist == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  for (dirpath = strtok_r(pathlist, ":", &saveptr);
+       dirpath != NULL;
+       dirpath = strtok_r(NULL, ":", &saveptr))
+    {
+      DIR *dirp;
+      FAR struct dirent *entryp;
+
+      if (dirpath[0] == '\0')
+        {
+          dirpath = ".";
+        }
+
+      dirp = opendir(dirpath);
+      if (dirp == NULL)
+        {
+          continue;
+        }
+
+      while ((entryp = readdir(dirp)) != NULL)
+        {
+          int ret;
+
+          if (strcmp(entryp->d_name, ".") == 0 ||
+              strcmp(entryp->d_name, "..") == 0)
+            {
+              continue;
+            }
+
+          if (DIRENT_ISDIRECTORY(entryp->d_type))
+            {
+              continue;
+            }
+
+          ret = add_file_app(info, entryp->d_name);
+          if (ret < 0)
+            {
+              closedir(dirp);
+              free(pathlist);
+              return ret;
+            }
+        }
+
+      closedir(dirp);
+    }
+
+  free(pathlist);
+
+  /* Deduplicate entries collected from all PATH directories. */
+
+  deduplicate_file_apps(info);
+  return OK;
+}
+#endif
+
+/****************************************************************************
+ * Name: help_file_apps
+ ****************************************************************************/
+
+#if defined(CONFIG_NSH_FILE_APPS) && !defined(CONFIG_NSH_DISABLE_HELP)
+static void help_file_apps(FAR struct nsh_vtbl_s *vtbl)
+{
+  struct file_app_info_s info;
+  static FAR const char *const g_fileapp_prompt = "\nFile Apps:\n";
+  int ret;
+
+  memset(&info, 0, sizeof(info));
+
+  ret = collect_path_file_apps(&info);
+
+  if (ret >= 0 && info.count > 0)
+    {
+      help_namelist(vtbl, g_fileapp_prompt, info.count,
+                    (FAR const char * const *)info.names);
+    }
+
+  free_file_apps(&info);
 }
 #endif
 
@@ -1062,6 +1379,12 @@ static int cmd_help(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
       /* And show the list of built-in applications */
 
       help_builtins(vtbl);
+
+      /* And show the list of file applications */
+
+#ifdef CONFIG_NSH_FILE_APPS
+      help_file_apps(vtbl);
+#endif
     }
 
   return OK;
@@ -1291,10 +1614,28 @@ int nsh_command(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char *argv[])
 
 #if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
     defined(CONFIG_READLINE_HAVE_EXTMATCH)
+#ifdef CONFIG_NSH_FILE_APPS
+static void nsh_extmatch_init_file_apps(void)
+{
+  if (collect_path_file_apps(&g_completion_cache) == OK)
+    {
+#ifdef CONFIG_DISABLE_PTHREAD
+      g_completion_cache_initialized = true;
+#endif
+    }
+  else
+    {
+      g_completion_cache.count = 0;
+    }
+}
+#endif
+
 int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
 {
   int nr_matches = 0;
   int i;
+
+  /* Search built-in commands */
 
   for (i = 0; i < (int)NUM_CMDS; i++)
     {
@@ -1305,10 +1646,39 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
 
           if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
             {
-              break;
+              return nr_matches;
             }
         }
     }
+
+  /* Initialize file app cache on first call */
+
+#ifdef CONFIG_NSH_FILE_APPS
+#ifndef CONFIG_DISABLE_PTHREAD
+  pthread_once(&g_completion_cache_once, nsh_extmatch_init_file_apps);
+#else
+  if (!g_completion_cache_initialized)
+    {
+      nsh_extmatch_init_file_apps();
+    }
+#endif
+
+  /* Search cached file apps */
+
+  for (i = 0; i < (int)g_completion_cache.count; i++)
+    {
+      if (strncmp(name, g_completion_cache.names[i], namelen) == 0)
+        {
+          matches[nr_matches] = NUM_CMDS + i;
+          nr_matches++;
+
+          if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
+            {
+              return nr_matches;
+            }
+        }
+    }
+#endif
 
   return nr_matches;
 }
@@ -1334,7 +1704,30 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
     defined(CONFIG_READLINE_HAVE_EXTMATCH)
 FAR const char *nsh_extmatch_getname(int index)
 {
-  DEBUGASSERT(index > 0 && index <= (int)NUM_CMDS);
-  return  g_cmdmap[index].cmd;
+  if (index < (int)NUM_CMDS)
+    {
+      DEBUGASSERT(index >= 0 && index < (int)NUM_CMDS);
+      return g_cmdmap[index].cmd;
+    }
+
+#ifdef CONFIG_NSH_FILE_APPS
+#ifndef CONFIG_DISABLE_PTHREAD
+  pthread_once(&g_completion_cache_once, nsh_extmatch_init_file_apps);
+  if (index >= (int)NUM_CMDS)
+#else
+  else if (index >= (int)NUM_CMDS
+           && g_completion_cache_initialized
+          )
+#endif
+    {
+      int file_index = index - NUM_CMDS;
+      if (file_index < (int)g_completion_cache.count)
+        {
+          return g_completion_cache.names[file_index];
+        }
+    }
+#endif
+
+  return NULL;
 }
 #endif
